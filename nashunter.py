@@ -300,49 +300,38 @@ def run_self_test():
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="nashunter.py",
-        description="Synology QuickConnect alias enumerator + unauth info-disclosure "
-                     "harvester. Authorized security testing only.",
+        prog="nashunter",
+        usage="nashunter [-h] (-n id [id ...] | -k word [word ...] | -kf file)"
+              " [options]",
+        description="checks Synology QuickConnect IDs and pulls whatever info a hit leaks",
+        epilog="ex: nashunter -k acme\n    nashunter -n some-known-id\n"
+               "    nashunter -kf keywords.txt -o hits.json",
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-n", "--name", nargs="+", metavar="ID",
-                        help="Exact QuickConnect ID(s) to check directly, no mutation")
-    group.add_argument("-k", "--keyword", nargs="+", metavar="KEYWORD",
-                        help="Keyword(s) (company name, abbreviation, site name) to "
-                             "mutate into a candidate wordlist")
-    group.add_argument("-kf", "--keyword-file", metavar="FILE",
-                        help="File of keywords, one per line, to mutate into a "
-                             "candidate wordlist")
-    group.add_argument("--self-test", action="store_true",
-                        help="Run built-in offline self-checks and exit")
+    group.add_argument("-n", "--name", nargs="+", metavar="id", help="check exact id(s)")
+    group.add_argument("-k", "--keyword", nargs="+", metavar="word",
+                        help="build wordlist from keyword(s)")
+    group.add_argument("-kf", "--keyword-file", metavar="file", help="keywords from file")
+    group.add_argument("--self-test", action="store_true", help="run offline checks and exit")
 
-    parser.add_argument("-m", "--mutations-file", metavar="FILE",
-                         help="Custom mutation patterns (one per line, %%KEYWORD%% "
-                              "placeholder). Defaults to the built-in NAS/office list.")
-    parser.add_argument("-o", "--output", metavar="FILE",
-                         help="Write hit results as JSON to this file")
-    parser.add_argument("-d", "--delay", type=float, default=1.5,
-                         help="Base delay in seconds between requests (default: 1.5)")
-    parser.add_argument("-j", "--jitter", type=float, default=1.5,
-                         help="Random extra delay 0..jitter seconds (default: 1.5)")
-    parser.add_argument("--max-errors", type=int, default=3,
-                         help="Abort after this many consecutive anomalous/error "
-                              "responses in a row (default: 3)")
-    parser.add_argument("--timeout", type=float, default=10.0,
-                         help="Per-request timeout in seconds (default: 10)")
-    parser.add_argument("--retries", type=int, default=2,
-                         help="Retries per request on transient network errors (default: 2)")
-    parser.add_argument("--no-tunnel", action="store_true",
-                         help="Skip the request_tunnel follow-up enrichment call on hits "
-                              "(get_server_info only)")
-    parser.add_argument("--user-agent", default=DEFAULT_UA, help="Custom User-Agent string")
-    parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    parser.add_argument("-m", "--mutations-file", metavar="file", help="custom pattern file")
+    parser.add_argument("-o", "--output", metavar="file", help="save hits as json")
+    parser.add_argument("-d", "--delay", type=float, default=1.5, metavar="sec",
+                         help="delay between requests (default 1.5)")
+    parser.add_argument("-j", "--jitter", type=float, default=1.5, metavar="sec",
+                         help="random extra delay (default 1.5)")
+    parser.add_argument("--max-errors", type=int, default=3, metavar="n",
+                         help="abort after n bad responses in a row (default 3)")
+    parser.add_argument("--timeout", type=float, default=10.0, metavar="sec",
+                         help="request timeout (default 10)")
+    parser.add_argument("--retries", type=int, default=2, metavar="n",
+                         help="retries on network error (default 2)")
+    parser.add_argument("--no-tunnel", action="store_true", help="skip relay enrichment call")
+    parser.add_argument("--user-agent", default=DEFAULT_UA, metavar="ua", help="custom user agent")
+    parser.add_argument("--no-color", action="store_true", help="disable colored output")
     parser.add_argument("--no-doh-fallback", action="store_true",
-                         help="Don't fall back to DNS-over-HTTPS (1.1.1.1) if the local "
-                              "resolver can't find global.quickconnect.to. Off by default "
-                              "so the tool self-heals on broken resolvers (common on "
-                              "WSL2/VPN split-DNS setups); set this if you specifically "
-                              "don't want any traffic to Cloudflare's resolver.")
+                         help="don't fall back to DoH if local DNS fails")
     args = parser.parse_args()
 
     if args.self_test:
