@@ -64,9 +64,8 @@ QC_ID_RE = re.compile(r"^[a-z][a-z0-9-]{5,19}$")
 
 
 def _doh_resolve(host: str) -> Optional[str]:
-    """Resolve `host` via Cloudflare DNS-over-HTTPS. The resolver is queried
-    by IP literal, so this works even when the local resolver is fully
-    broken. Common failure mode on WSL2 and VPN split DNS setups."""
+    """Resolve via Cloudflare DoH. Queried by IP literal, so it works even
+    when the local resolver is dead (common on WSL2 / VPN split DNS)."""
     try:
         req = urllib.request.Request(
             f"{DOH_RESOLVER}?name={host}&type=A",
@@ -87,10 +86,8 @@ def _patched_getaddrinfo(host, *args, **kwargs):
 
 
 def ensure_resolvable(host: str, use_color: bool, use_doh_fallback: bool) -> bool:
-    """Make sure `host` resolves before spending a run's worth of requests
-    on it. If the local resolver fails and the DoH fallback is allowed, patch
-    socket.getaddrinfo for this process only so every subsequent connection
-    to `host` resolves via the cached DoH result instead."""
+    """Check host resolves before burning a run on it. Falls back to DoH
+    and patches getaddrinfo for this process if the local resolver's dead."""
     try:
         _real_getaddrinfo(host, 443)
         return True
@@ -210,13 +207,9 @@ def _post(payload: dict, timeout: float, retries: int, backoff: float, user_agen
 
 
 def classify_get_server_info(entry: dict) -> str:
-    """Synology collapses two different situations into the same errno 4:
-    a name that was never registered (suberrno 1, no "sites" key) vs an
-    account that IS registered but currently has zero connected devices
-    (suberrno 0, a "sites" key present, even if empty). The second is a
-    real finding, this org has/had a Synology NAS under this name, just
-    not one with a device online right now, so it's worth surfacing
-    separately from a plain miss instead of discarding the distinction."""
+    """errno 4 means two different things: never registered (no "sites"
+    key), or registered with zero devices online ("sites" key present,
+    even empty). Second one's a real finding, not a miss."""
     errno = entry.get("errno")
     if errno == 0:
         return "hit"
@@ -411,10 +404,7 @@ def main():
                 consecutive_bad = 0
                 print(c(f"[ {i}/{len(candidates)} ] miss: {candidate}", "grey", use_color))
             elif result.status == "registered":
-                # Same errno as a miss, but a real account exists under this
-                # name, it just has no device connected right now. Not a
-                # sign of rate limiting/blocking, so it doesn't count toward
-                # the circuit breaker either.
+                # real account, no device online, doesn't count as a bad response
                 consecutive_bad = 0
                 registered.append({"candidate": candidate})
                 print(c(f"[ {i}/{len(candidates)} ] registered, no device online: {candidate}",
