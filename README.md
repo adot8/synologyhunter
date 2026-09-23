@@ -61,3 +61,12 @@ POST https://global.quickconnect.to/Serv.php
 ```
 
 errno 4 means the alias doesn't exist. errno 0 with a full server object means it does, and none of it needs auth.
+
+## Disclaimer
+
+The information and materials provided in this repository are for **educational, research, and authorized testing purposes only**. 
+
+The author is **not responsible for any misuse, damage, or illegal actions** caused by the software, code, or information contained herein. By downloading, cloning, or using any part of this repository, you agree that you are solely responsible for your own actions and compliance with all applicable local, national, and international laws.
+
+**Usage of these tools for attacking targets without prior mutual consent is illegal.** It is the end user's responsibility to obey all applicable laws. The author assumes no liability and is not responsible for any misuse or damage caused by this program.
+
