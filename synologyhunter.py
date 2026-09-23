@@ -1,43 +1,4 @@
 #!/usr/bin/env python3
-"""
-synologyhunter.py
-
-Checks Synology QuickConnect IDs and pulls whatever info a hit leaks without
-any authentication. WAN IP, LAN subnet, gateway, DSM port, relay endpoints.
-
-Same idea as cloud_enum. Take a keyword, mutate it into a wordlist, spray it
-against a shared provider namespace, report what exists. Here the provider
-is Synology's QuickConnect relay instead of S3/Azure/GCS.
-
-Research notes:
-Endpoint : POST https://global.quickconnect.to/Serv.php
-Body     : [{"version":1,"command":"get_server_info","stop_when_error":false,
-             "stop_when_success":true,"id":"dsm","serverID":"<candidate>"}]
-Miss     : errno 4, errinfo "...[Alias not found]"
-Hit      : errno 0, full "server"/"service"/"smartdns" object returned, no auth
-A follow up "request_tunnel" call against a confirmed hit also discloses a
-relay IP and port that bridges straight to the NAS's DSM web service.
-
-No throttling showed up in testing. That's not a guarantee at scale, and
-global.quickconnect.to is shared Synology infrastructure serving every
-Synology customer, not something owned by any one target. Getting flagged
-there follows you to the next target too, so defaults here are conservative:
-
-  sequential requests only, no threading
-  randomized jitter delay between every request
-  backoff and retry on transient network errors
-  a circuit breaker that aborts the whole run after --max-errors consecutive
-  bad responses, since that pattern usually means rate limiting or a WAF
-  a plain, self identifying User-Agent instead of spoofing a browser
-
-Candidate IDs should only be built from a target you're actually authorized
-to test. This queries a shared third party service, not the target's own
-infrastructure, so random enumeration is out of scope even if a target isn't.
-
-Read only. Never touches DSM's login or auth endpoint. No credential
-guessing, no brute force, no lockout testing.
-"""
-
 import argparse
 import json
 import random
