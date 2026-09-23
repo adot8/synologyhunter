@@ -4,24 +4,38 @@ nashunter checks Synology QuickConnect IDs and pulls whatever info a hit leaks w
 
 Same idea as cloud_enum. Give it a keyword, it builds a wordlist, sprays it against Synology's QuickConnect API and reports what exists.
 
-Read only. It never touches DSM's login page, so no credential guessing, no brute forcing, no lockout testing.
-
-## Installation
-
-```
-git clone https://github.com/adot8/nashunter.git && cd nashunter
-```
-
-Nothing to install. Just needs Python 3.
-
 ## Usage
 
 ```bash
-./nashunter.py -n some-known-id
+usage: nashunter [-h] (-n id [id ...] | -k word [word ...] | -kf file) [options]
 
-./nashunter.py -k acme "acme corp" acmeio
+checks Synology QuickConnect IDs and pulls whatever info a hit leaks
 
-./nashunter.py -kf keywords.txt -o hits.json
+options:
+  -h, --help            show this help message and exit
+  -n, --name id [id ...]
+                        check exact id(s)
+  -k, --keyword word [word ...]
+                        build wordlist from keyword(s)
+  -kf, --keyword-file file
+                        keywords from file
+  --self-test           run offline checks and exit
+  -m, --mutations-file file
+                        custom pattern file
+  -o, --output file     save hits as json
+  -d, --delay sec       delay between requests (default 1.5)
+  -j, --jitter sec      random extra delay (default 1.5)
+  --max-errors n        abort after n bad responses in a row (default 3)
+  --timeout sec         request timeout (default 10)
+  --retries n           retries on network error (default 2)
+  --no-tunnel           skip relay enrichment call
+  --user-agent ua       custom user agent
+  --no-color            disable colored output
+  --no-doh-fallback     don't fall back to DoH if local DNS fails
+
+ex: nashunter -k acme
+    nashunter -n some-known-id
+    nashunter -kf keywords.txt -o hits.json
 ```
 
 `-n` checks an exact ID with no mutation. `-k` and `-kf` build a wordlist from keywords using a built in list of NAS and office naming patterns like nas, ds, backup, it, hq, 01. Pass your own list with `-m patterns.txt` using `%KEYWORD%` as the placeholder.
