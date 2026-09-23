@@ -1,13 +1,13 @@
-# nashunter
+# synologyhunter
 
-nashunter checks Synology QuickConnect IDs and pulls whatever info a hit leaks without any authentication. WAN IP, LAN subnet, gateway, DSM port, and a relay endpoint that connects straight to the NAS's DSM login page over the internet with no port forward needed.
+synologyhunter checks Synology QuickConnect IDs and pulls whatever info a hit leaks without any authentication. WAN IP, LAN subnet, gateway, DSM port, and a relay endpoint that connects straight to the NAS's DSM login page over the internet with no port forward needed.
 
 Same idea as cloud_enum. Give it a keyword, it builds a wordlist, sprays it against Synology's QuickConnect API and reports what exists.
 
 ## Usage
 
 ```bash
-usage: nashunter [-h] (-n id [id ...] | -k word [word ...] | -kf file) [options]
+usage: synologyhunter [-h] (-n id [id ...] | -k word [word ...] | -kf file) [options]
 
 checks Synology QuickConnect IDs and pulls whatever info a hit leaks
 
@@ -33,9 +33,9 @@ options:
   --no-color            disable colored output
   --no-doh-fallback     don't fall back to DoH if local DNS fails
 
-ex: nashunter -k acme
-    nashunter -n some-known-id
-    nashunter -kf keywords.txt -o hits.json
+ex: synologyhunter -k acme
+    synologyhunter -n some-known-id
+    synologyhunter -kf keywords.txt -o hits.json
 ```
 
 `-n` checks an exact ID with no mutation. `-k` and `-kf` build a wordlist from keywords using a built in list of NAS and office naming patterns like nas, ds, backup, it, hq, 01. Pass your own list with `-m patterns.txt` using `%KEYWORD%` as the placeholder.
