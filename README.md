@@ -2,7 +2,7 @@
 
 synologyhunter checks Synology QuickConnect IDs and pulls whatever info a hit leaks without any authentication. WAN IP, LAN subnet, gateway, DSM port, and a relay endpoint that connects straight to the NAS's DSM login page over the internet with no port forward needed.
 
-Same idea as cloud_enum. Give it a keyword, it builds a wordlist, sprays it against Synology's QuickConnect API and reports what exists.
+Same idea as [cloud_enum](https://github.com/initstring/cloud_enum). Give it a keyword, it builds a wordlist, sprays it against Synology's QuickConnect API and reports what exists.
 
 ## Usage
 
