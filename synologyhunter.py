@@ -1,4 +1,43 @@
 #!/usr/bin/env python3
+"""
+synologyhunter.py
+
+Checks Synology QuickConnect IDs and pulls whatever info a hit leaks without
+any authentication. WAN IP, LAN subnet, gateway, DSM port, relay endpoints.
+
+Same idea as cloud_enum. Take a keyword, mutate it into a wordlist, spray it
+against a shared provider namespace, report what exists. Here the provider
+is Synology's QuickConnect relay instead of S3/Azure/GCS.
+
+Research notes:
+Endpoint : POST https://global.quickconnect.to/Serv.php
+Body     : [{"version":1,"command":"get_server_info","stop_when_error":false,
+             "stop_when_success":true,"id":"dsm","serverID":"<candidate>"}]
+Miss     : errno 4, errinfo "...[Alias not found]"
+Hit      : errno 0, full "server"/"service"/"smartdns" object returned, no auth
+A follow up "request_tunnel" call against a confirmed hit also discloses a
+relay IP and port that bridges straight to the NAS's DSM web service.
+
+No throttling showed up in testing. That's not a guarantee at scale, and
+global.quickconnect.to is shared Synology infrastructure serving every
+Synology customer, not something owned by any one target. Getting flagged
+there follows you to the next target too, so defaults here are conservative:
+
+  sequential requests only, no threading
+  randomized jitter delay between every request
+  backoff and retry on transient network errors
+  a circuit breaker that aborts the whole run after --max-errors consecutive
+  bad responses, since that pattern usually means rate limiting or a WAF
+  a plain, self identifying User-Agent instead of spoofing a browser
+
+Candidate IDs should only be built from a target you're actually authorized
+to test. This queries a shared third party service, not the target's own
+infrastructure, so random enumeration is out of scope even if a target isn't.
+
+Read only. Never touches DSM's login or auth endpoint. No credential
+guessing, no brute force, no lockout testing.
+"""
+
 import argparse
 import json
 import random
@@ -102,7 +141,7 @@ DEFAULT_MUTATIONS = [
 @dataclass
 class QueryResult:
     candidate: str
-    status: str  # "hit" | "miss" | "anomaly" | "error"
+    status: str  # "hit" | "miss" | "registered" | "anomaly" | "error"
     data: Optional[dict] = field(default=None)
     error: Optional[str] = field(default=None)
 
@@ -170,6 +209,22 @@ def _post(payload: dict, timeout: float, retries: int, backoff: float, user_agen
     return None, str(last_exc)
 
 
+def classify_get_server_info(entry: dict) -> str:
+    """Synology collapses two different situations into the same errno 4:
+    a name that was never registered (suberrno 1, no "sites" key) vs an
+    account that IS registered but currently has zero connected devices
+    (suberrno 0, a "sites" key present, even if empty). The second is a
+    real finding, this org has/had a Synology NAS under this name, just
+    not one with a device online right now, so it's worth surfacing
+    separately from a plain miss instead of discarding the distinction."""
+    errno = entry.get("errno")
+    if errno == 0:
+        return "hit"
+    if errno == 4:
+        return "registered" if "sites" in entry else "miss"
+    return "anomaly"
+
+
 def query_get_server_info(candidate: str, timeout: float, retries: int, backoff: float,
                            user_agent: str) -> QueryResult:
     entry, err = _post(
@@ -179,12 +234,8 @@ def query_get_server_info(candidate: str, timeout: float, retries: int, backoff:
     )
     if entry is None:
         return QueryResult(candidate, "error", error=err)
-    errno = entry.get("errno")
-    if errno == 0:
-        return QueryResult(candidate, "hit", data=entry)
-    if errno == 4:
-        return QueryResult(candidate, "miss")
-    return QueryResult(candidate, "anomaly", data=entry)
+    status = classify_get_server_info(entry)
+    return QueryResult(candidate, status, data=entry if status in ("hit", "anomaly") else None)
 
 
 def query_request_tunnel(candidate: str, timeout: float, retries: int, backoff: float,
@@ -256,6 +307,12 @@ def run_self_test():
     assert "acme-nas" in cands
     assert "acmenas" in cands
     assert all(QC_ID_RE.match(x) for x in cands)
+
+    assert classify_get_server_info({"errno": 0}) == "hit"
+    assert classify_get_server_info({"errno": 4, "suberrno": 1}) == "miss"
+    assert classify_get_server_info({"errno": 4, "suberrno": 0, "sites": []}) == "registered"
+    assert classify_get_server_info({"errno": 7}) == "anomaly"
+
     print("self-test OK -", len(cands), "candidates generated for 'Acme'")
 
 
@@ -277,7 +334,7 @@ def main():
     group.add_argument("--self-test", action="store_true", help="run offline checks and exit")
 
     parser.add_argument("-m", "--mutations-file", metavar="file", help="custom pattern file")
-    parser.add_argument("-o", "--output", metavar="file", help="save hits as json")
+    parser.add_argument("-o", "--output", metavar="file", help="save hits/registered as json")
     parser.add_argument("-d", "--delay", type=float, default=1.5, metavar="sec",
                          help="delay between requests (default 1.5)")
     parser.add_argument("-j", "--jitter", type=float, default=1.5, metavar="sec",
@@ -336,7 +393,7 @@ def main():
             f"{args.delay}s (+0-{args.jitter}s jitter), max-errors={args.max_errors}",
             "grey", use_color))
 
-    hits, consecutive_bad = [], 0
+    hits, registered, consecutive_bad = [], [], 0
     try:
         for i, candidate in enumerate(candidates, 1):
             result = query_get_server_info(candidate, args.timeout, args.retries,
@@ -353,6 +410,15 @@ def main():
             elif result.status == "miss":
                 consecutive_bad = 0
                 print(c(f"[ {i}/{len(candidates)} ] miss: {candidate}", "grey", use_color))
+            elif result.status == "registered":
+                # Same errno as a miss, but a real account exists under this
+                # name, it just has no device connected right now. Not a
+                # sign of rate limiting/blocking, so it doesn't count toward
+                # the circuit breaker either.
+                consecutive_bad = 0
+                registered.append({"candidate": candidate})
+                print(c(f"[ {i}/{len(candidates)} ] registered, no device online: {candidate}",
+                        "yellow", use_color))
             else:
                 consecutive_bad += 1
                 label = "anomaly" if result.status == "anomaly" else "error"
@@ -370,13 +436,14 @@ def main():
     except KeyboardInterrupt:
         print(c("\n[!] interrupted by user", "yellow", use_color))
 
-    print(c(f"\n[*] done: {len(hits)} hit(s) out of {len(candidates)} candidate(s) checked",
-            "bold", use_color))
+    print(c(f"\n[*] done: {len(hits)} hit(s), {len(registered)} registered-but-offline "
+            f"account(s) out of {len(candidates)} candidate(s) checked", "bold", use_color))
 
-    if args.output and hits:
+    if args.output and (hits or registered):
         with open(args.output, "w") as f:
-            json.dump(hits, f, indent=2)
-        print(f"[*] wrote {len(hits)} hit(s) to {args.output}")
+            json.dump({"hits": hits, "registered_offline": registered}, f, indent=2)
+        print(f"[*] wrote {len(hits)} hit(s) and {len(registered)} registered-but-offline "
+              f"account(s) to {args.output}")
 
 
 if __name__ == "__main__":
