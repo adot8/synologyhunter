@@ -1,72 +1,119 @@
 #!/usr/bin/env python3
 """
-nashunter.py - Synology QuickConnect alias enumerator + unauth info-disclosure harvester
+nashunter.py
 
-Authorized security testing tool (Null Threat Labs). Sprays candidate QuickConnect
-IDs against Synology's public relay API to find whether a target's NAS is reachable
-via https://quickconnect.to/<id>, and if so, pulls whatever unauthenticated recon
-data that ID leaks - WAN IP, LAN subnet/gateway, DSM ports, relay endpoints.
+Checks Synology QuickConnect IDs and pulls whatever info a hit leaks without
+any authentication. WAN IP, LAN subnet, gateway, DSM port, relay endpoints.
 
-Modeled on cloud_enum's approach (keyword -> mutated wordlist -> spray against a
-shared provider namespace -> report hits), but for Synology QuickConnect instead
-of S3/Azure/GCS buckets.
+Same idea as cloud_enum. Take a keyword, mutate it into a wordlist, spray it
+against a shared provider namespace, report what exists. Here the provider
+is Synology's QuickConnect relay instead of S3/Azure/GCS.
 
---- Research notes (2026-09-23), see engagement log for full detail ---
+Research notes:
 Endpoint : POST https://global.quickconnect.to/Serv.php
 Body     : [{"version":1,"command":"get_server_info","stop_when_error":false,
              "stop_when_success":true,"id":"dsm","serverID":"<candidate>"}]
 Miss     : errno 4, errinfo "...[Alias not found]"
-Hit      : errno 0, full "server"/"service"/"smartdns" object returned, NO AUTH
-A follow-up "request_tunnel" call against a confirmed hit additionally discloses a
-relay IP/port that live-bridges to the NAS's DSM web service on the internet.
+Hit      : errno 0, full "server"/"service"/"smartdns" object returned, no auth
+A follow up "request_tunnel" call against a confirmed hit also discloses a
+relay IP and port that bridges straight to the NAS's DSM web service.
 
-Rate limiting: none observed (no 429, no CAPTCHA/WAF page, consistent response
-shape) across a 15-request rapid-fire burst from one source IP during research.
-That is NOT a guarantee at higher volumes or over a longer campaign -
-global.quickconnect.to is SHARED SYNOLOGY INFRASTRUCTURE serving every Synology
-customer worldwide, not something owned by any one client. Treat it like any
-other shared third-party service you spray during an engagement: be a good
-citizen, because burning this IP's reputation against Synology affects every
-future engagement, not just this one. Defaults here are deliberately conservative:
+No throttling showed up in testing. That's not a guarantee at scale, and
+global.quickconnect.to is shared Synology infrastructure serving every
+Synology customer, not something owned by any one target. Getting flagged
+there follows you to the next target too, so defaults here are conservative:
 
-  - sequential requests only (no threading) - see bottom of file for why
-  - randomized jitter delay between every request
-  - exponential backoff + retry on transient network errors
-  - a circuit breaker that ABORTS the whole run after --max-errors consecutive
-    non-standard responses (HTTP errors, non-JSON bodies, unexpected errno) -
-    that pattern is the signature of a WAF challenge or a ban starting to bite
-  - a descriptive, contactable User-Agent (self-identifying, like a legitimate
-    research/scanning bot) instead of spoofing a browser - lower odds of being
-    flagged as malicious traffic in the first place, and gives Synology's abuse
-    team something honest to look at if they ever do
+  sequential requests only, no threading
+  randomized jitter delay between every request
+  backoff and retry on transient network errors
+  a circuit breaker that aborts the whole run after --max-errors consecutive
+  bad responses, since that pattern usually means rate limiting or a WAF
+  a plain, self identifying User-Agent instead of spoofing a browser
 
-SCOPE: candidate IDs must only be derived from the AUTHORIZED target's own
-name/keywords (company name, abbreviations, site names). This queries a shared
-third-party (Synology) service, not the client's own infrastructure - do not
-use this to enumerate random/unrelated names, only permutations of the specific,
-in-scope target you have written authorization to test.
+Candidate IDs should only be built from a target you're actually authorized
+to test. This queries a shared third party service, not the target's own
+infrastructure, so random enumeration is out of scope even if a target isn't.
 
-This tool performs READ-ONLY alias enumeration and info-disclosure harvesting
-only. It never touches DSM's login/auth endpoint - no credential guessing, no
-brute force, no lockout testing. That is a separate, explicitly-scoped test.
+Read only. Never touches DSM's login or auth endpoint. No credential
+guessing, no brute force, no lockout testing.
 """
 
 import argparse
 import json
 import random
 import re
+import socket
 import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlsplit
 
 API_URL = "https://global.quickconnect.to/Serv.php"
-DEFAULT_UA = "nashunter/1.0 (+authorized-security-research; contact: ajohnson@nullthreat.ca)"
+API_HOST = urlsplit(API_URL).hostname
+DEFAULT_UA = "nashunter/1.0"
+DOH_RESOLVER = "https://1.1.1.1/dns-query"  # IP literal, resolves with no local DNS at all
+
+_real_getaddrinfo = socket.getaddrinfo
+_dns_cache = {}
 
 # Synology QuickConnect ID rules: 6-20 chars, starts with a letter, letters/digits/hyphens.
 QC_ID_RE = re.compile(r"^[a-z][a-z0-9-]{5,19}$")
+
+
+def _doh_resolve(host: str) -> Optional[str]:
+    """Resolve `host` via Cloudflare DNS-over-HTTPS. The resolver is queried
+    by IP literal, so this works even when the local resolver is fully
+    broken. Common failure mode on WSL2 and VPN split DNS setups."""
+    try:
+        req = urllib.request.Request(
+            f"{DOH_RESOLVER}?name={host}&type=A",
+            headers={"accept": "application/dns-json", "User-Agent": DEFAULT_UA},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        for ans in data.get("Answer", []):
+            if ans.get("type") == 1:  # A record
+                return ans["data"]
+    except Exception:
+        return None
+    return None
+
+
+def _patched_getaddrinfo(host, *args, **kwargs):
+    return _real_getaddrinfo(_dns_cache.get(host, host), *args, **kwargs)
+
+
+def ensure_resolvable(host: str, use_color: bool, use_doh_fallback: bool) -> bool:
+    """Make sure `host` resolves before spending a run's worth of requests
+    on it. If the local resolver fails and the DoH fallback is allowed, patch
+    socket.getaddrinfo for this process only so every subsequent connection
+    to `host` resolves via the cached DoH result instead."""
+    try:
+        _real_getaddrinfo(host, 443)
+        return True
+    except socket.gaierror:
+        pass
+
+    if not use_doh_fallback:
+        print(c(f"[!] local DNS resolution failed for {host} and --no-doh-fallback "
+                "is set, nothing more to try", "red", use_color))
+        return False
+
+    print(c(f"[!] local DNS resolution failed for {host}, falling back to "
+            "DNS-over-HTTPS (common on WSL2/VPN split-DNS setups)", "yellow", use_color))
+    ip = _doh_resolve(host)
+    if ip is None:
+        print(c(f"[!] DoH fallback also failed to resolve {host}. Check "
+                "connectivity/proxy settings", "red", use_color))
+        return False
+
+    _dns_cache[host] = ip
+    socket.getaddrinfo = _patched_getaddrinfo
+    print(c(f"[*] resolved {host} -> {ip} via DoH fallback", "grey", use_color))
+    return True
 
 DEFAULT_MUTATIONS = [
     "%KEYWORD%",
@@ -181,7 +228,7 @@ def query_get_server_info(candidate: str, timeout: float, retries: int, backoff:
 
 def query_request_tunnel(candidate: str, timeout: float, retries: int, backoff: float,
                           user_agent: str) -> Optional[dict]:
-    """Follow-up call for confirmed hits only - discloses relay IP/port that
+    """Follow up call for confirmed hits only. Discloses relay IP/port that
     live-bridges to the NAS's DSM web service."""
     entry, err = _post(
         {"version": 1, "command": "request_tunnel", "stop_when_error": False,
@@ -238,17 +285,17 @@ def print_hit(record: dict, use_color: bool):
 
 
 def run_self_test():
-    assert normalize_keyword("Charleson Group") == {"charlesongroup", "charleson-group"}
+    assert normalize_keyword("Acme Corp") == {"acmecorp", "acme-corp"}
     assert normalize_keyword("   ") == set()
-    assert sanitize_candidate("Charleson--NAS!!") == "charleson-nas"
+    assert sanitize_candidate("Acme--NAS!!") == "acme-nas"
     assert sanitize_candidate("ab") is None  # too short (<6)
     assert sanitize_candidate("-leading-hyphen") == "leadinghyphen" or True  # stripped, still valid
     assert sanitize_candidate("1starts-with-digit") is None  # must start with a letter
-    cands = build_candidates(["Charleson"], DEFAULT_MUTATIONS)
-    assert "charleson-nas" in cands
-    assert "charlesonnas" in cands
+    cands = build_candidates(["Acme"], DEFAULT_MUTATIONS)
+    assert "acme-nas" in cands
+    assert "acmenas" in cands
     assert all(QC_ID_RE.match(x) for x in cands)
-    print("self-test OK -", len(cands), "candidates generated for 'Charleson'")
+    print("self-test OK -", len(cands), "candidates generated for 'Acme'")
 
 
 def main():
@@ -290,6 +337,12 @@ def main():
                               "(get_server_info only)")
     parser.add_argument("--user-agent", default=DEFAULT_UA, help="Custom User-Agent string")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    parser.add_argument("--no-doh-fallback", action="store_true",
+                         help="Don't fall back to DNS-over-HTTPS (1.1.1.1) if the local "
+                              "resolver can't find global.quickconnect.to. Off by default "
+                              "so the tool self-heals on broken resolvers (common on "
+                              "WSL2/VPN split-DNS setups); set this if you specifically "
+                              "don't want any traffic to Cloudflare's resolver.")
     args = parser.parse_args()
 
     if args.self_test:
@@ -297,6 +350,9 @@ def main():
         return
 
     use_color = not args.no_color and sys.stdout.isatty()
+
+    if not ensure_resolvable(API_HOST, use_color, not args.no_doh_fallback):
+        sys.exit(1)
 
     if args.name:
         candidates = []
@@ -346,7 +402,7 @@ def main():
                 print_hit(record, use_color)
             elif result.status == "miss":
                 consecutive_bad = 0
-                print(c(f"[ {i}/{len(candidates)} ] miss - {candidate}", "grey", use_color))
+                print(c(f"[ {i}/{len(candidates)} ] miss: {candidate}", "grey", use_color))
             else:
                 consecutive_bad += 1
                 label = "anomaly" if result.status == "anomaly" else "error"
@@ -354,8 +410,8 @@ def main():
                 print(c(f"[!] {label} on {candidate}: {detail}", "yellow", use_color))
                 if consecutive_bad >= args.max_errors:
                     print(c(f"[!] ABORTING: {consecutive_bad} consecutive "
-                            "anomalous/error responses in a row - this looks like "
-                            "rate-limiting, a WAF challenge, or a ban starting to bite. "
+                            "anomalous/error responses in a row. This usually means "
+                            "rate limiting, a WAF challenge, or a ban starting to bite. "
                             "Stop and investigate before resuming.", "red", use_color))
                     break
 
@@ -364,7 +420,7 @@ def main():
     except KeyboardInterrupt:
         print(c("\n[!] interrupted by user", "yellow", use_color))
 
-    print(c(f"\n[*] done - {len(hits)} hit(s) out of {len(candidates)} candidate(s) checked",
+    print(c(f"\n[*] done: {len(hits)} hit(s) out of {len(candidates)} candidate(s) checked",
             "bold", use_color))
 
     if args.output and hits:

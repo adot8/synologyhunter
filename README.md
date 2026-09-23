@@ -1,82 +1,49 @@
 # nashunter
 
-Synology QuickConnect alias enumerator + unauthenticated info-disclosure harvester.
+nashunter checks Synology QuickConnect IDs and pulls whatever info a hit leaks without any authentication. WAN IP, LAN subnet, gateway, DSM port, and a relay endpoint that connects straight to the NAS's DSM login page over the internet with no port forward needed.
 
-Sprays candidate QuickConnect IDs against Synology's public relay API
-(`global.quickconnect.to`) to find whether a target's NAS is reachable via
-`https://quickconnect.to/<id>`, and if it is, pulls whatever unauthenticated
-recon data that ID leaks: WAN IP, LAN subnet/gateway, DSM ports, and a relay
-endpoint that live-bridges to the NAS's DSM web service over the internet.
+Same idea as cloud_enum. Give it a keyword, it builds a wordlist, sprays it against Synology's QuickConnect API and reports what exists.
 
-Modeled on `cloud_enum`'s approach — keyword -> mutated wordlist -> spray
-against a shared provider namespace -> report hits — but for Synology
-QuickConnect instead of S3/Azure/GCS buckets.
+Read only. It never touches DSM's login page, so no credential guessing, no brute forcing, no lockout testing.
 
-Does **not** touch DSM's login/auth endpoint. Read-only alias enumeration and
-info-disclosure harvesting only — no credential guessing, no brute force, no
-lockout testing. That's a separate, explicitly-scoped test (see engagement
-notes for the manual `auth.cgi` methodology if needed).
+## Installation
+
+```
+git clone https://github.com/adot8/nashunter.git && cd nashunter
+```
+
+Nothing to install. Just needs Python 3.
 
 ## Usage
 
 ```bash
-# Check a specific known/suspected ID directly, no mutation
-./nashunter.py -n charleson-nas
+./nashunter.py -n some-known-id
 
-# Generate a wordlist from keywords and spray it
-./nashunter.py -k charleson "charleson group" cgi
+./nashunter.py -k acme "acme corp" acmeio
 
-# Keywords from a file, custom mutation patterns, save hits to JSON
-./nashunter.py -kf keywords.txt -m custom_mutations.txt -o hits.json
-
-# Offline sanity check of the mutation/validation logic (no network calls)
-./nashunter.py --self-test
+./nashunter.py -kf keywords.txt -o hits.json
 ```
 
-`-m`/`--mutations-file` takes one pattern per line with a `%KEYWORD%`
-placeholder — extend the built-in NAS/office naming list (`-nas`, `-ds`,
-`-backup`, `-it`, `-hq`, `-01`, etc.) for a specific client's naming
-conventions if the defaults don't fit.
+`-n` checks an exact ID with no mutation. `-k` and `-kf` build a wordlist from keywords using a built in list of NAS and office naming patterns like nas, ds, backup, it, hq, 01. Pass your own list with `-m patterns.txt` using `%KEYWORD%` as the placeholder.
 
-## Safety / OPSEC — why it's slow by default
+`--self-test` runs the wordlist logic offline with no network calls, good for checking it still works after editing the mutation list.
 
-`global.quickconnect.to` is **Synology's shared infrastructure**, serving
-every Synology customer worldwide — not something owned by any one client.
-Burning this IP's reputation against it affects every future engagement, not
-just the one you're running. Research notes (2026-09-23): no rate limiting
-observed across a 15-request burst from one source IP (no 429, no CAPTCHA/WAF
-page), but that's not a guarantee at higher volumes or over a longer
-campaign. Defaults are deliberately conservative:
+Every hit gets a second automatic call that pulls the relay IP and port bridging to the NAS. Skip it with `--no-tunnel` if you only want the basic info.
 
-- Sequential requests only, no threading.
-- Randomized jitter delay between every request (`-d`/`-j`).
-- Exponential backoff + retry on transient network errors.
-- A circuit breaker (`--max-errors`, default 3) that **aborts the whole run**
-  on repeated non-standard responses — HTTP errors, non-JSON bodies,
-  unexpected `errno` values. That pattern is the signature of a WAF challenge
-  or a ban starting to bite.
-- A descriptive, contactable User-Agent (`nashunter/1.0 (+authorized-
-  security-research; contact: ajohnson@nullthreat.ca)`) instead of spoofing a
-  browser — lower odds of being flagged as malicious traffic, and gives
-  Synology's abuse team something honest to look at if they ever go looking.
+## Rate limiting
 
-**Scope:** candidate IDs must only be derived from the authorized target's
-own name/keywords. This queries a shared third-party service, not the
-client's own infrastructure — don't use this to enumerate random/unrelated
-names, only permutations of the specific, in-scope target you have written
-authorization to test.
+global.quickconnect.to is shared Synology infrastructure, not something any one target owns. Getting flagged there follows you to the next target too, so this is slow on purpose. No throttling showed up in testing, but that's not a guarantee at scale.
 
-## API notes
+It runs one request at a time with a random delay between each one. Network errors get retried with backoff. If it sees a few bad responses in a row it stops the whole run instead of hammering something that might be rate limiting or blocking it.
+
+Only run this against keywords tied to something you're actually authorized to test. It hits Synology's servers, not the target's, so random enumeration is out of scope even if the target itself isn't.
+
+## API
 
 ```
 POST https://global.quickconnect.to/Serv.php
-Body: [{"version":1,"command":"get_server_info","stop_when_error":false,
-        "stop_when_success":true,"id":"dsm","serverID":"<candidate>"}]
-
-Miss: errno 4, errinfo "...[Alias not found]"
-Hit:  errno 0, full server/service/smartdns object, no auth required
+[{"version":1,"command":"get_server_info","stop_when_error":false,
+  "stop_when_success":true,"id":"dsm","serverID":"<candidate>"}]
 ```
 
-A follow-up `request_tunnel` call (made automatically for confirmed hits,
-skip with `--no-tunnel`) additionally discloses a relay IP/port that
-live-bridges to the NAS's DSM web service.
+errno 4 means the alias doesn't exist. errno 0 with a full server object means it does, and none of it needs auth.
